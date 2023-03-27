@@ -1,0 +1,270 @@
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(rsample) 
+library(randomForest)
+library(lubridate)
+library(modelr)
+library(gbm)
+library(caret)
+library(ggmap)
+library(maps)
+library(mapdata)
+library(dplyr)
+library(ggplot2)
+library(base)
+library(purrr)
+install.packages("pdp")
+
+# override the default setting of ggplot
+theme_set(theme_minimal())
+
+#Q2 - Part 1
+## Tree Modeling: Dengue Cases
+### CART
+dengue = read.csv("C:\\Users\\USER\\Data_Mining\\Exercise 3\\Data\\dengue.csv", 
+                  header = TRUE, stringsAsFactors=FALSE)
+# Data Cleaning: NA values 
+dengue <- na.exclude(dengue)
+dengue$city = dengue$city %>% factor()
+dengue$season = dengue$season %>% factor()
+# Testing and Training Sets
+dengue_split = initial_split(dengue, prop = 0.9)
+dengue_train = training(dengue_split)
+dengue_test = testing(dengue_split)
+# The Tree, CART Model
+dengue_tree = rpart(total_cases ~ ., data = dengue_train,
+                    control = rpart.control(cp = 0.002, minsplit=30))
+rpart.plot(dengue_tree, digits=-5, type=4, extra=1)
+# The function that prunes the tree at that level
+prune_1se = function(my_tree) {
+  out = as.data.frame(my_tree$cptable)
+  thresh = min(out$xerror + out$xstd)
+  cp_opt = max(out$CP[out$xerror <= thresh])
+  prune(my_tree, cp=cp_opt)
+}
+# Prune to check if it is the best model
+prune_dengue_tree = prune_1se(dengue_tree)
+# Check
+rmse_CART = rmse(prune_dengue_tree, dengue_test)
+cat(rmse_CART,' RMSE for Pruned CART Model') 
+
+
+# Part 2
+### Random Forests
+denguerandom = randomForest(total_cases ~ ., data= dengue_train, importance = TRUE)
+plot(denguerandom)
+rmse_random = rmse(denguerandom, dengue_test)
+cat(rmse_random,' RMSE for Random Forest')
+
+
+# Part 3
+### Gradient Boosted Trees
+# Boosted Trees
+dengueboost = gbm(total_cases ~ ., data= dengue_train,
+             interaction.depth=4, n.trees=350, shrinkage=.05, cv.folds = 10, 
+             distribution='gaussian')
+gbm.perf(dengueboost)
+# Check
+rmse_boosted = rmse(dengueboost, dengue_test) 
+cat(rmse_boosted,' RMSE for Gradient Boosted Trees') 
+
+
+# Part 4
+### Partial Dependency Plots
+# Plots
+partialPlot(denguerandom, dengue_test, 'specific_humidity', las=1)
+partialPlot(denguerandom, dengue_test, 'precipitation_amt', las=1)
+partialPlot(denguerandom, dengue_test, 'tdtr_k', las=1)
+
+
+#Data for q3 +q4
+greenbuildings = read.csv('C:/Users/user/Desktop/greenbuildings.csv')
+CAhousing = read.csv('C:/Users/user/Desktop/CAhousing.csv' )
+#Q3
+# create the revenue per per square foot variable 
+greenbuildings = mutate(greenbuildings, revenue = Rent * leasing_rate)
+greenbuildings = greenbuildings %>% drop_na()
+# split data into training and testing
+set.seed(100)
+green_split =  initial_split(greenbuildings, prop=0.8)
+green_train = training(green_split)
+green_test  = testing(green_split)
+# let's fit a single tree
+green.tree = rpart(revenue ~ . - LEED - Energystar - cd_total_07 - hd_total07 - leasing_rate - Rent, data=green_train, control = rpart.control(cp = 0.00001), na.action=na.omit)
+# now a random forest
+green.forest = randomForest(revenue ~ . - LEED - Energystar - cd_total_07 - hd_total07- leasing_rate - Rent, data=green_train, na.action=na.omit, importance = TRUE)
+# gbm tuning for green
+hyper_grid <- expand.grid(
+  shrinkage = c(.01, .1, .3),
+  interaction.depth = c(1, 3, 5),
+  n.minobsinnode = c(5, 10, 15),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0,               # a place to dump results
+  min_RMSE = 0                     # a place to dump results
+)
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  green.gbm.tune <- gbm(
+    revenue ~ . - LEED - Energystar - cd_total_07 - hd_total07- leasing_rate - Rent, 
+    data = green_train,
+    distribution = "gaussian",
+    n.trees = 500,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    bag.fraction = hyper_grid$bag.fraction[i],
+    train.fraction = .75,
+    n.cores = NULL, # will use all cores by default
+    verbose = FALSE
+  )
+  # add min training error and trees to grid
+  hyper_grid$optimal_trees[i] <- which.min(green.gbm.tune$valid.error)
+  hyper_grid$min_RMSE[i] <- sqrt(min(green.gbm.tune$valid.error))
+}
+
+# check which parameters are performing better 
+top10_green = hyper_grid %>% 
+  arrange(min_RMSE) %>%
+  head(10)
+# Then use this new grid 2 to run the loop again
+# grid 2 
+hyper_grid <- expand.grid(
+  shrinkage = c(.05, .1, .2),
+  interaction.depth = c(12, 15, 17),
+  n.minobsinnode = c(3, 5, 10),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0,              
+  min_RMSE = 0                     
+)
+# decided on these parameters, and fit the final bgm
+green.boost = gbm(revenue ~ . - LEED - Energystar - cd_total_07 - hd_total07- leasing_rate - Rent, data=green_train, interaction.depth=18, n.trees=600, shrinkage=.2, cv.folds = 10)
+# compare RMSE 
+rmse_green.tree=rmse(green.tree, green_test)
+rmse_green.forest=rmse(green.forest, green_test) 
+rmse_green.boost=rmse(green.boost, green_test) 
+
+# variable importance measures
+vi = varImpPlot(green.forest, type=1)
+
+# partial dependence plots
+# these are trying to isolate the partial effect of specific features
+# on the outcome
+pdp::partial(green.forest ,pred.var = "green_rating") %>% 
+  ggplot() +
+  geom_col(aes(x = factor(green_rating), y=yhat, fill = factor(green_rating))) +
+  labs(x = "Green Certification",y = "Predicted Value", title = "Partial dependence plot of Green Certification")+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))+
+  guides(color = guide_legend(title=" Green Certification"))
+
+#Q4
+#plot 1 + tree and forest
+# split data into training and testing:    
+set.seed(101)
+ca_split =  initial_split(CAhousing, prop=0.8)
+ca_train = training(ca_split)
+ca_test  = testing(ca_split)
+
+# fit a single tree
+ca.tree = rpart(medianHouseValue ~ . , data=ca_train, control = rpart.control(cp = 0.00001))
+
+# random forest 
+ca.forest = randomForest(medianHouseValue ~ . , data=ca_train, control = rpart.control(cp = 0.00001), importance=TRUE)
+
+#ca.bgm tuning
+hyper_grid <- expand.grid(
+  shrinkage = c(.01, .1, .3),
+  interaction.depth = c(1, 3, 5),
+  n.minobsinnode = c(5, 10, 15),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0,               # a place to dump results
+  min_RMSE = 0                     # a place to dump results
+)
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  gbm.tune <- gbm(
+    formula = medianHouseValue ~ .,
+    data = ca_train,
+    distribution = "gaussian",
+    n.trees = 700,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    bag.fraction = hyper_grid$bag.fraction[i],
+    train.fraction = .75,
+    n.cores = NULL, # will use all cores by default
+    verbose = FALSE
+  )
+  
+  # add min training error and trees to grid
+  hyper_grid$optimal_trees[i] <- which.min(gbm.tune$valid.error)
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.tune$valid.error))
+}
+# check which parameters are performing better 
+hyper_grid %>% 
+  arrange(min_RMSE) %>%
+  head(10)
+# narrow the grid: second try
+hyper_grid <- expand.grid(
+  shrinkage = c(.1, .3, .5),
+  interaction.depth = c(3, 5, 7),
+  n.minobsinnode = c(5, 10, 15),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0,               # a place to dump results
+  min_RMSE = 0                     # a place to dump results
+)
+# final boosted model
+ca.boost = gbm(medianHouseValue ~ ., data = ca_train, distribution = "gaussian", interaction.depth=5, n.trees=659,  shrinkage=.3, cv.folds =10)
+
+#compare three models
+# the model we choose here is: random forest for now 
+rmse_ca.tree = rmse(ca.tree, ca_test)
+rmse_ca.forest = rmse(ca.forest, ca_test)
+rmse_ca.boost = rmse(ca.boost, ca_test)
+
+#plots
+# getting the California data
+states <- map_data("state")
+ca_df <- subset(states, region == "california")
+
+# plain map of ca
+ca_base <- ggplot(data = ca_df, mapping = aes(x = long, y = lat)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "black", fill = "gray")
+
+# PLOT1: original data
+ca_plot1 <- ca_base + geom_point(data = CAhousing, aes(x=longitude, y=latitude,    color=medianHouseValue))+scale_color_continuous(type = "viridis")+
+  labs(title = " Actual Median House Value in California", x="longitude", y="latitude")+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))+
+  guides(color = guide_legend(title="Median Value"))
+
+# PLOT2: prediction 
+CAhousing = CAhousing %>%
+  mutate(ca_pred = predict(ca.boost, CAhousing))
+ca_plot2 <- ca_base + geom_point(data = CAhousing, aes(x=longitude, y=latitude, color=ca_pred)) + 
+  scale_color_continuous(type = "viridis")+
+  labs(title = "Predicted Median House Value in California", x="longitude", y="latitude")+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))+
+  guides(color = guide_legend(title=" Predicted Value"))
+
+# PLOT3: residual
+CAhousing = CAhousing %>%
+  mutate(ca_resid = sqrt((medianHouseValue-ca_pred)^2))
+ca_plot3 <- ca_base +
+  geom_point(data = CAhousing, aes(x=longitude, y=latitude, color=ca_resid)) + 
+  scale_color_continuous(type = "viridis")+
+  labs(title = "Residuals of Median House Value in California", x="longitude", y="latitude")+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))+
+  guides(color = guide_legend(title="Residual"))
+
+ca_plot1
+ca_plot2
+ca_plot3
